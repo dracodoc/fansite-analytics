@@ -1,0 +1,95 @@
+---
+title: "Solution notes"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table, stringr, lubridate, readr, ggplot2, scales)
+```
+
+## read/parse log file
+
+I tried two methods to read and parse the log file.
+
+- `readr` package can read and parse in *9 secs*, with 26 parse failures, most came from the extra `"`.
+
+- Improved `read_lines` function to read file in memory (*6 secs*), then use regular expressions to parse the columns. With carefully tested regex pattern I parsed all data without failure, got a more cleaned up and complete dataset (*27 secs*). 
+
+Since the rare parse failures from `readr` doesn't have negative impact on questions, I chose the `readr` method.
+
+I also tried reading file with python. Reading file contents into memory can take only 1 sec, but I still need to parse the file with regular expressions(some existing library doesn't fit my requirement). I didn't pursue further because I wanted to focus on R. 
+
+## feature 1
+
+The `data.table` make this kind of analysis very easy and fast.
+
+    top_hosts <- na.omit(dt[, .N, by = host][order(-N)][1:10])
+
+## feature 2
+
+The resource is a part of the request string. I tried two approaches:
+- calculate top 10 requests based on the request string, then extract the resource
+- extract resource string from all request first, then calculate based on the resource
+
+The second is much slower because it need to do regular expression match on all rows. However there are some requests accessing same resource recorded in variations. Clean up the resource string first will have more accurate results.
+
+```{r}
+unique(dt[str_detect(request, "hatch-hand"), request])
+```
+
+Because of the huge speed penalty and the small difference in result, I chose the first method in this case. However the problem need to be noticed and evaluated first.
+
+## feature 3
+
+The definition of 60 minutes window could take any second as start. I implemented a version that follow this definition, then the "top 10" list just became 10 one second variation of same top 1 window. 
+
+I don't like this result and choose the whole hour for time window instead. The code is simple and fast, and the result is more meaningful. With a glance I found the majority of the top 10 hours are in same day. A google search found that was the launch of Space Shuttle Discovery STS-70.
+```{r}
+top10[]
+```
+
+## feature 4
+
+### reduce data scales
+
+The problem definition is procedural and you have to scan the data by order. To avoid a big complex interwound of `for loop`s and `if else`s, I first filtered the data to make sure only scan data needed, then arrange condition checks carefully to improve the performance and decouple the code.
+
+Note the algorithm still consider the success logins in scan, but only the hosts with >=3 failures are worth checking. This reduced the data set 3247 times.
+
+```{r}
+data_scale <- c(total = dt[, .N],
+                logins = dt_4[, .N],
+                multi_failed_logins = dt_4[(fail), .N, by = host][N >= 3][, .N]
+                )
+data_scale_df <- data.frame(data_scale)
+data_scale_df[]
+```
+
+condition list in the algorithm:
+
+- c1 within same host
+- c2 not banned. 
+- c3 check failure entries, start from 3rd onward
+- c4 no success in i, i-1, i-2
+- c5 time difference i, i-2 <= 20 secs
+
+### unneeded extra cost
+
+One caveat of using `readr` to parse log file is that it didn't save the original lines. Because the question ask the original log lines, I have to read the log again to pick up the lines. This added extra **7 secs** which should not happen in real cases.
+
+### test data and plot of result
+
+This question is difficult to debug or test because the conditions are complex, the executions branches are difficult to predict. The log file looks big in size, but itself didn't cover many cases in the problem because most entries belong to a small set of patterns. I created some test data so it's easier to test all cases. Then I made a plot to show the result more clearly. X axis is the time of entry, Y axis is the index of host so entries from same host will show in a horizontal line. Green point for success logins, red for failure. 
+
+For the original input data, the time scales make the pattern almost impossible to be seen. So I added red cicrle to highlight the banned entries, green square to highlight the success entries which will reset the failures before it.
+
+![test data plot](test_data_plot.png)
+
+Now the banned entries are obvious in plot, but to see the detailed information for each host you need to zoom in a lot. I created a Shiny app to interactively zoom in the plot. (I also [posted my code as a gist](https://gist.github.com/dracodoc/d231fb467cd31f4c6956cf5acba025ec), which can convert any ggplot2 plot into a zoomable plot in one line)
+
+![full data plot](full_data.gif)
+
+### in streaming fashion
+
+This question is like a streaming question, so I also wrote a version that will read data in chunk. It will process the data in current chunk, merge the last 20 seconds of data with next chunk and process it. This will ensure the scan transit to next chunk seamlessly. It can process unlimited data size, the only performance requirement is to process one chunk before next chunk arrive. That will not be a problem unless the streaming speed is extremely large, like 100M/s.
